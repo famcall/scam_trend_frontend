@@ -1,146 +1,180 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import ScamCard from "./ScamCard";
 
-type ScamItem = {
-  id: string;
-  title: string;
-  content: string;
-  source: string;
-  url: string;
-  scam_score: number;
-  scam_categories: string[];
+type RiskObject = {
+  score?: number;
+  level?: "low" | "medium" | "high" | "critical";
+  confidence?: number;
+  categories?: string[];
+  reasons?: string[];
+};
+
+type EventItem = {
+  event_id: string;
+  timestamp?: string;
+  title?: string;
+  content?: string;
+  source?: string;
+  url?: string;
+  risk?: RiskObject;
 };
 
 export default function ScamStream() {
-  const [items, setItems] = useState<ScamItem[]>([]);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const speedRef = useRef(0.3); // スクロール速度
-  const pausedRef = useRef(false);
+  const [events, setEvents] = useState<EventItem[]>([]);
+  const [loading, setLoading] = useState(true);
 
-  // データ取得
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // scroll control
+  const speedRef = useRef<number>(0.25);
+  const pausedRef = useRef<boolean>(false);
+
+  // =========================
+  // Data Fetch (Risk API)
+  // =========================
   useEffect(() => {
-    fetch("http://localhost:3000/api/data", { cache: "no-store" })
-      .then((res) => res.json())
-      .then((json) => {
-        if (json?.semantic?.items) {
-          // リスクスコア順でソート（高→低）
-          const sorted = [...json.semantic.items].sort(
-            (a: ScamItem, b: ScamItem) => b.scam_score - a.scam_score
-          );
-          setItems(sorted);
+    let mounted = true;
+
+    const load = async () => {
+      try {
+        setLoading(true);
+        const res = await fetch("/api/risk?limit=200&minScore=0", {
+          cache: "no-store",
+        });
+        const json = await res.json();
+
+        const list: EventItem[] = json?.data?.events ?? [];
+
+        // 並び順ルール（商品設計）
+        // 1. risk.score DESC
+        // 2. timestamp DESC
+        const sorted = [...list].sort((a, b) => {
+          const s = (b?.risk?.score ?? 0) - (a?.risk?.score ?? 0);
+          if (s !== 0) return s;
+
+          const ta = new Date(a?.timestamp ?? 0).getTime();
+          const tb = new Date(b?.timestamp ?? 0).getTime();
+          return tb - ta;
+        });
+
+        if (mounted) {
+          setEvents(sorted);
+          setLoading(false);
         }
-      });
+      } catch (e) {
+        console.error("Risk API fetch error:", e);
+        if (mounted) setLoading(false);
+      }
+    };
+
+    load();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  // 自動スクロール
+  // =========================
+  // Auto Scroll Engine
+  // =========================
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
 
     let rafId: number;
 
-    const scroll = () => {
+    const tick = () => {
       if (!pausedRef.current) {
         el.scrollTop += speedRef.current;
 
-        // ループ処理
+        // 無限ループ
         if (el.scrollTop + el.clientHeight >= el.scrollHeight - 2) {
           el.scrollTop = 0;
         }
       }
-      rafId = requestAnimationFrame(scroll);
+      rafId = requestAnimationFrame(tick);
     };
 
-    rafId = requestAnimationFrame(scroll);
-
+    rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, []);
 
   return (
     <div className="h-screen bg-gradient-to-b from-black via-zinc-900 to-black text-white overflow-hidden">
-      {/* ヘッダー */}
-      <div className="p-4 border-b border-zinc-800 flex justify-between items-center">
-        <h1 className="text-xl font-bold tracking-wide">
-          Scam Trend Stream
-        </h1>
-        <div className="flex gap-2">
+
+      {/* =========================
+          Header
+      ========================= */}
+      <div className="p-4 border-b border-zinc-800 flex justify-between items-center backdrop-blur bg-black/40 sticky top-0 z-20">
+        <div>
+          <h1 className="text-xl font-bold tracking-wide">
+            Scam Trend Stream
+          </h1>
+          <div className="text-xs text-zinc-400">
+            Real-time Risk Intelligence Platform
+          </div>
+        </div>
+
+        <div className="flex gap-2 items-center">
+          <div className="text-xs text-zinc-400 mr-3">
+            EVENTS: {events.length}
+          </div>
+
           <button
             onClick={() => (pausedRef.current = !pausedRef.current)}
-            className="px-3 py-1 text-xs bg-zinc-800 rounded"
+            className="px-3 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 rounded transition"
           >
-            ⏯ Pause
+            {pausedRef.current ? "▶ Resume" : "⏸ Pause"}
           </button>
+
           <button
             onClick={() => (speedRef.current = 0.1)}
-            className="px-2 py-1 text-xs bg-zinc-800 rounded"
+            className="px-2 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 rounded"
           >
             Slow
           </button>
+
           <button
-            onClick={() => (speedRef.current = 0.3)}
-            className="px-2 py-1 text-xs bg-zinc-800 rounded"
+            onClick={() => (speedRef.current = 0.25)}
+            className="px-2 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 rounded"
           >
             Normal
           </button>
+
           <button
-            onClick={() => (speedRef.current = 0.8)}
-            className="px-2 py-1 text-xs bg-zinc-800 rounded"
+            onClick={() => (speedRef.current = 0.6)}
+            className="px-2 py-1 text-xs bg-zinc-800 hover:bg-zinc-700 rounded"
           >
             Fast
           </button>
         </div>
       </div>
 
-      {/* ストリーム */}
+      {/* =========================
+          Stream Body
+      ========================= */}
       <div
         ref={containerRef}
-        className="h-[calc(100vh-64px)] overflow-y-scroll scrollbar-hide px-4 py-6 space-y-4"
+        className="h-[calc(100vh-80px)] overflow-y-scroll px-4 py-6 space-y-4 scrollbar-hide"
       >
-        {[...items, ...items].map((item, i) => (
-          <div
-            key={`${item.id}-${i}`}
-            className="rounded-xl border border-zinc-800 bg-zinc-900/60 backdrop-blur p-4 shadow-lg"
-          >
-            {/* リスクバー */}
-            <div className="flex items-center gap-3 mb-2">
-              <div
-                className={`w-2 h-2 rounded-full ${
-                  item.scam_score >= 5
-                    ? "bg-red-500"
-                    : item.scam_score >= 3
-                    ? "bg-yellow-400"
-                    : "bg-green-400"
-                }`}
-              />
-              <span className="text-xs text-zinc-400">
-                Risk {item.scam_score}
-              </span>
-              <span className="text-xs text-zinc-500">
-                {item.scam_categories.join(", ")}
-              </span>
-            </div>
-
-            <h2 className="text-sm font-semibold leading-snug mb-1">
-              {item.title}
-            </h2>
-
-            <p className="text-xs text-zinc-400 line-clamp-2 mb-2">
-              {item.content}
-            </p>
-
-            <div className="flex justify-between text-[10px] text-zinc-500">
-              <span>{item.source}</span>
-              <a
-                href={item.url}
-                target="_blank"
-                className="hover:text-white"
-              >
-                open →
-              </a>
-            </div>
+        {loading && (
+          <div className="text-center text-zinc-500 text-sm mt-10 animate-pulse">
+            Loading risk intelligence stream...
           </div>
-        ))}
+        )}
+
+        {!loading && events.length === 0 && (
+          <div className="text-center text-zinc-500 text-sm mt-10">
+            No risk events available
+          </div>
+        )}
+
+        {/* 無限ストリーム描画 */}
+        {!loading &&
+          [...events, ...events].map((ev, i) => (
+            <ScamCard key={`${ev.event_id}-${i}`} event={ev} />
+          ))}
       </div>
     </div>
   );
