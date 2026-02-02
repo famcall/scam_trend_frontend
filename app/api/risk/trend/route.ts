@@ -2,8 +2,8 @@ import fs from "fs";
 import path from "path";
 import { NextResponse } from "next/server";
 
-import { authenticate } from "../_core/auth";
-import { logUsage } from "../_core/usage";
+import { authenticate } from "@/app/api/_core/auth";
+import { logUsage } from "@/app/api/_core/usage";
 
 /**
  * Trend API v1
@@ -63,7 +63,7 @@ export async function GET(req: Request) {
     // ============================
     // 🔐 Step 3-1: Authentication
     // ============================
-    const client = authenticate(req, "trend");
+    const client = authenticate(req, "risk.trend");
 
     if (!client) {
       return NextResponse.json(

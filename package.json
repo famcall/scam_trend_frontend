@@ -7,12 +7,18 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "key:issue": "tsx scripts/issue-api-key.ts"
+    "key:issue": "tsx scripts/issue-api-key.ts",
+    "key:disable": "tsx scripts/disable-api-key.ts",
+    "key:list": "tsx scripts/list-api-keys.ts",
+    "key:rotate": "tsx scripts/rotate-api-key.ts",
+    "key:notify": "tsx scripts/notify-expiring-keys.ts"
   },
   "dependencies": {
     "next": "16.1.5",
+    "openapi3-ts": "^4.5.0",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "swagger-ui-react": "^5.31.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

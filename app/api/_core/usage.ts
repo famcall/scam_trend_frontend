@@ -1,6 +1,10 @@
-// scam_trend_frontend/app/api/_core/usage.ts
 import fs from "fs";
 import path from "path";
+import { isKeyUsable } from "./keyLifecycle";
+
+/* =========================
+   Types
+========================= */
 
 type UsageLog = {
   apiKey: string;
@@ -10,7 +14,7 @@ type UsageLog = {
 
 type UsageState = {
   apiKey: string;
-  minuteWindow: number; // ms
+  minuteWindow: number; // epoch ms
   minuteCount: number;
   dayWindow: string; // YYYY-MM-DD
   dayCount: number;
@@ -18,13 +22,16 @@ type UsageState = {
 
 type ApiClient = {
   key: string;
-  owner: string;
-  plan: string;
-  scopes: string[];
   rate_limit_per_min: number;
   daily_quota: number;
   active: boolean;
+  expires_at?: string;
+  disabled_at?: string;
 };
+
+/* =========================
+   Paths
+========================= */
 
 const DATA_DIR = path.resolve("../scam_trend_collector/data");
 const LOG_PATH = path.join(DATA_DIR, "usage_log.json");
@@ -35,8 +42,10 @@ const KEY_DB_PATH = path.join(DATA_DIR, "api_keys.json");
    Utils
 ========================= */
 
-function ensureDir(p: string) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+function ensureDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
 }
 
 function loadJson<T>(p: string, fallback: T): T {
@@ -49,7 +58,7 @@ function loadJson<T>(p: string, fallback: T): T {
 }
 
 function saveJson(p: string, obj: any) {
-  ensureDir(DATA_DIR);
+  ensureDir();
   fs.writeFileSync(p, JSON.stringify(obj, null, 2));
 }
 
@@ -66,76 +75,88 @@ function loadClients(): ApiClient[] {
   return Array.isArray(raw.keys) ? raw.keys : [];
 }
 
-function loadState(): UsageState[] {
-  return loadJson<UsageState[]>(STATE_PATH, []);
-}
-
-function saveState(state: UsageState[]) {
-  saveJson(STATE_PATH, state);
-}
-
-function appendLog(entry: UsageLog) {
-  const logs = loadJson<UsageLog[]>(LOG_PATH, []);
-  logs.push(entry);
-  saveJson(LOG_PATH, logs);
-}
-
 /* =========================
    Core
 ========================= */
 
+/**
+ * logUsage
+ *
+ * - 認証後に必ず呼ばれる
+ * - ここで「最終防衛ライン」を張る
+ *
+ * throws:
+ *  - INVALID_API_KEY
+ *  - API_KEY_NOT_USABLE
+ *  - RATE_LIMIT_EXCEEDED
+ *  - DAILY_QUOTA_EXCEEDED
+ */
 export function logUsage(apiKey: string, endpoint: string) {
   const clients = loadClients();
-  const client = clients.find((c) => c.key === apiKey);
+  const client = clients.find(c => c.key === apiKey);
 
-  if (!client) throw new Error("INVALID_API_KEY");
-  if (!client.active) throw new Error("API_KEY_DISABLED");
+  if (!client) {
+    throw new Error("INVALID_API_KEY");
+  }
+
+  // 🔒 lifecycle 最終チェック（auth通過後でも必須）
+  if (!isKeyUsable(client)) {
+    throw new Error("API_KEY_NOT_USABLE");
+  }
 
   const now = Date.now();
   const today = todayStr();
 
-  const state = loadState();
-  let userState = state.find((s) => s.apiKey === apiKey);
+  const state = loadJson<UsageState[]>(STATE_PATH, []);
+  let s = state.find(x => x.apiKey === apiKey);
 
-  if (!userState) {
-    userState = {
+  if (!s) {
+    s = {
       apiKey,
       minuteWindow: now,
       minuteCount: 0,
       dayWindow: today,
       dayCount: 0,
     };
-    state.push(userState);
+    state.push(s);
   }
 
-  // minute window reset
-  if (now - userState.minuteWindow >= 60_000) {
-    userState.minuteWindow = now;
-    userState.minuteCount = 0;
+  /* ===== window reset ===== */
+
+  if (now - s.minuteWindow >= 60_000) {
+    s.minuteWindow = now;
+    s.minuteCount = 0;
   }
 
-  // day window reset
-  if (userState.dayWindow !== today) {
-    userState.dayWindow = today;
-    userState.dayCount = 0;
+  if (s.dayWindow !== today) {
+    s.dayWindow = today;
+    s.dayCount = 0;
   }
 
-  // enforce
-  if (userState.minuteCount >= client.rate_limit_per_min) {
+  /* ===== enforce ===== */
+
+  if (s.minuteCount >= client.rate_limit_per_min) {
     throw new Error("RATE_LIMIT_EXCEEDED");
   }
-  if (userState.dayCount >= client.daily_quota) {
+
+  if (s.dayCount >= client.daily_quota) {
     throw new Error("DAILY_QUOTA_EXCEEDED");
   }
 
-  // increment
-  userState.minuteCount += 1;
-  userState.dayCount += 1;
+  /* ===== increment ===== */
 
-  saveState(state);
-  appendLog({
+  s.minuteCount += 1;
+  s.dayCount += 1;
+
+  saveJson(STATE_PATH, state);
+
+  /* ===== logging (best-effort) ===== */
+
+  const logs = loadJson<UsageLog[]>(LOG_PATH, []);
+  logs.push({
     apiKey,
     endpoint,
     timestamp: new Date().toISOString(),
   });
+  saveJson(LOG_PATH, logs);
 }

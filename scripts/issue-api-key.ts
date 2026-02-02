@@ -1,7 +1,10 @@
-// scam_trend_frontend/scripts/issue-api-key.ts
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
+
+/* =========================
+   Types
+========================= */
 
 type ApiKeyRecord = {
   key: string;
@@ -12,18 +15,42 @@ type ApiKeyRecord = {
   daily_quota: number;
   active: boolean;
   created_at: string;
+
+  // 🔐 lifecycle
+  expires_at?: string;   // demo / enterprise のみ
+  rotated_at?: string;
+
+  // meta
+  env?: string;
   note?: string;
+
+  // disable info
+  disabled_at?: string;
+  disabled_reason?: string;
 };
 
 type ApiKeyDb = {
   keys: ApiKeyRecord[];
 };
 
+/* =========================
+   Paths
+========================= */
+
+// NOTE:
+// - frontend repo から collector 側の data を直接操作する設計
+// - 本番では ENV / DB / KMS 等に差し替える
 const DATA_DIR = path.resolve("../scam_trend_collector/data");
 const DB_PATH = path.join(DATA_DIR, "api_keys.json");
 
+/* =========================
+   File Utils
+========================= */
+
 function ensureDir(p: string) {
-  if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+  if (!fs.existsSync(p)) {
+    fs.mkdirSync(p, { recursive: true });
+  }
 }
 
 function loadDb(): ApiKeyDb {
@@ -42,9 +69,13 @@ function saveDb(db: ApiKeyDb) {
   fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2));
 }
 
-function genKey(prefix = "rk") {
-  // 例: rk_live_3f2a... (運用上、目視しやすい形式)
-  const rand = crypto.randomBytes(24).toString("hex"); // 48 chars
+/* =========================
+   Key Generator
+========================= */
+
+function genKey(prefix: string) {
+  // 48 hex chars = 十分な強度 + 目視可能
+  const rand = crypto.randomBytes(24).toString("hex");
   return `${prefix}_${rand}`;
 }
 
@@ -56,34 +87,31 @@ function uniqKey(db: ApiKeyDb, prefix: string) {
   throw new Error("FAILED_TO_GENERATE_UNIQUE_KEY");
 }
 
+/* =========================
+   CLI Args
+========================= */
+
 function parseArgs(argv: string[]) {
-  // node scripts/issue-api-key.ts --owner=xxx --plan=demo --env=dev --active=true --note="..."
   const out: Record<string, string> = {};
   for (const a of argv) {
     if (!a.startsWith("--")) continue;
     const idx = a.indexOf("=");
-    if (idx === -1) {
-      out[a.slice(2)] = "true";
-    } else {
-      out[a.slice(2, idx)] = a.slice(idx + 1);
-    }
+    if (idx === -1) out[a.slice(2)] = "true";
+    else out[a.slice(2, idx)] = a.slice(idx + 1);
   }
   return out;
 }
 
-function splitCsv(s: string | undefined): string[] {
-  if (!s) return [];
-  return s
-    .split(",")
-    .map((x) => x.trim())
-    .filter((x) => x.length > 0);
+function splitCsv(v?: string): string[] {
+  if (!v) return [];
+  return v.split(",").map((x) => x.trim()).filter(Boolean);
 }
 
 function boolOf(v: string | undefined, fallback: boolean) {
   if (v == null) return fallback;
   const t = v.toLowerCase();
-  if (t === "true" || t === "1" || t === "yes") return true;
-  if (t === "false" || t === "0" || t === "no") return false;
+  if (["true", "1", "yes"].includes(t)) return true;
+  if (["false", "0", "no"].includes(t)) return false;
   return fallback;
 }
 
@@ -93,60 +121,81 @@ function intOf(v: string | undefined, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/* =========================
+   Plan Preset (Single Source of Truth)
+========================= */
+
 function preset(plan: string) {
-  // 最適解：plan が商品設計の“真実”になるようにここで固定
-  // scope は endpoint と一致させてブレないようにする
-  if (plan === "developer") {
-    return {
-      rate_limit_per_min: 60,
-      daily_quota: 10000,
-      scopes: ["risk.read", "risk.events", "risk.summary", "risk.trend"],
-      prefix: "rk_dev",
-    };
+  // ⚠️ ここが「商品設計の真実」
+  switch (plan) {
+    case "developer":
+      return {
+        prefix: "rk_dev",
+        rate_limit_per_min: 60,
+        daily_quota: 10_000,
+        scopes: ["risk.read", "risk.events", "risk.summary", "risk.trend"],
+        expires_days: undefined, // 無期限
+      };
+
+    case "demo":
+      return {
+        prefix: "rk_demo",
+        rate_limit_per_min: 30,
+        daily_quota: 3_000,
+        scopes: ["risk.read", "risk.summary"],
+        expires_days: 30,
+      };
+
+    case "enterprise":
+      return {
+        prefix: "rk_live",
+        rate_limit_per_min: 300,
+        daily_quota: 200_000,
+        scopes: ["risk.read", "risk.events", "risk.summary", "risk.trend"],
+        expires_days: 90,
+      };
+
+    default:
+      return {
+        prefix: "rk_custom",
+        rate_limit_per_min: 30,
+        daily_quota: 3_000,
+        scopes: ["risk.read"],
+        expires_days: 30,
+      };
   }
-  if (plan === "demo") {
-    return {
-      rate_limit_per_min: 30,
-      daily_quota: 3000,
-      scopes: ["risk.read", "risk.summary"],
-      prefix: "rk_demo",
-    };
-  }
-  if (plan === "enterprise") {
-    return {
-      rate_limit_per_min: 300,
-      daily_quota: 200000,
-      scopes: ["risk.read", "risk.events", "risk.summary", "risk.trend"],
-      prefix: "rk_live",
-    };
-  }
-  // unknown plan fallback
-  return {
-    rate_limit_per_min: 30,
-    daily_quota: 3000,
-    scopes: ["risk.read"],
-    prefix: "rk_custom",
-  };
 }
+
+/* =========================
+   Expiration Logic
+========================= */
+
+function calcExpiresAt(days?: number): string | undefined {
+  if (!days) return undefined;
+  const ms = days * 24 * 60 * 60 * 1000;
+  return new Date(Date.now() + ms).toISOString();
+}
+
+/* =========================
+   Main
+========================= */
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
 
   const owner = args.owner || "unknown-owner";
   const plan = args.plan || "demo";
-
-  const env = (args.env || "dev").toLowerCase(); // dev|live など
+  const env = (args.env || "dev").toLowerCase(); // dev | live | staging
   const note = args.note || "";
 
   const p = preset(plan);
 
-  // 上書きしたい場合のみCLI指定（基本は preset を優先）
+  // 原則 preset 優先
   const rate_limit_per_min = intOf(args.rate, p.rate_limit_per_min);
   const daily_quota = intOf(args.quota, p.daily_quota);
 
-  // scopes は、指定があればそれを採用（ただし空はNG）
-  const scopes = splitCsv(args.scopes);
-  const finalScopes = scopes.length > 0 ? scopes : p.scopes;
+  const cliScopes = splitCsv(args.scopes);
+  const scopes = cliScopes.length > 0 ? cliScopes : p.scopes;
 
   const active = boolOf(args.active, true);
 
@@ -154,34 +203,41 @@ function main() {
   const prefix = `${p.prefix}_${env}`;
   const key = args.key || uniqKey(db, prefix);
 
-  const rec: ApiKeyRecord = {
+  const createdAt = new Date().toISOString();
+  const expiresAt = calcExpiresAt(p.expires_days);
+
+  const record: ApiKeyRecord = {
     key,
     owner,
     plan,
-    scopes: finalScopes,
+    scopes,
     rate_limit_per_min,
     daily_quota,
     active,
-    created_at: new Date().toISOString(),
+    created_at: createdAt,
+    expires_at: expiresAt,
+    env,
     note: note || undefined,
   };
 
-  db.keys.push(rec);
+  db.keys.push(record);
   saveDb(db);
 
-  // stdout: コピペしやすい形で出す（これを控える）
+  // ===== Output (copy-paste friendly) =====
   console.log("✅ API key issued");
   console.log("--------------------------------------------------");
-  console.log(`key: ${rec.key}`);
-  console.log(`owner: ${rec.owner}`);
-  console.log(`plan: ${rec.plan}`);
-  console.log(`active: ${rec.active}`);
-  console.log(`rate_limit_per_min: ${rec.rate_limit_per_min}`);
-  console.log(`daily_quota: ${rec.daily_quota}`);
-  console.log(`scopes: ${rec.scopes.join(", ")}`);
+  console.log(`key: ${record.key}`);
+  console.log(`owner: ${record.owner}`);
+  console.log(`plan: ${record.plan}`);
+  console.log(`env: ${record.env}`);
+  console.log(`active: ${record.active}`);
+  console.log(`rate_limit_per_min: ${record.rate_limit_per_min}`);
+  console.log(`daily_quota: ${record.daily_quota}`);
+  console.log(`scopes: ${record.scopes.join(", ")}`);
+  console.log(`expires_at: ${record.expires_at ?? "never"}`);
   console.log("--------------------------------------------------");
   console.log("Use header:");
-  console.log(`x-api-key: ${rec.key}`);
+  console.log(`x-api-key: ${record.key}`);
 }
 
 main();
