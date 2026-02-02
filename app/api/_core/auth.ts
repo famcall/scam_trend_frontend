@@ -1,3 +1,4 @@
+// scam_trend_frontend/app/api/_core/auth.ts
 import fs from "fs";
 import path from "path";
 
@@ -13,32 +14,27 @@ export type ApiClient = {
 
 const DB_PATH = path.resolve("../scam_trend_collector/data/api_keys.json");
 
-/* =========================
-   Loaders
-========================= */
-
 function loadKeys(): ApiClient[] {
   if (!fs.existsSync(DB_PATH)) return [];
-  const raw = JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
-  return raw?.keys || [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(DB_PATH, "utf-8"));
+    if (!raw || !Array.isArray(raw.keys)) return [];
+    return raw.keys;
+  } catch {
+    return [];
+  }
 }
-
-/* =========================
-   Auth Core
-========================= */
 
 export function authenticate(req: Request, scope: string): ApiClient | null {
   const apiKey = req.headers.get("x-api-key");
-
   if (!apiKey) return null;
 
   const keys = loadKeys();
-  const client = keys.find(k => k.key === apiKey);
+  const client = keys.find((k) => k.key === apiKey);
 
   if (!client) return null;
   if (!client.active) return null;
 
-  // scope enforcement
   if (!client.scopes.includes(scope)) return null;
 
   return client;
